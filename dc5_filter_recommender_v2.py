@@ -2,13 +2,9 @@
 import streamlit as st
 import pandas as pd
 from collections import Counter, defaultdict
-from itertools import combinations, combinations_with_replacement
 from math import log
 import io, re
 
-# ========================
-# Constants / maps
-# ========================
 DIGITS = list(range(10))
 EVEN = {0,2,4,6,8}
 ODD  = {1,3,5,7,9}
@@ -22,9 +18,6 @@ VTRAC_GROUPS = V_TRAC_GROUPS
 vtrac = V_TRAC_GROUPS
 mirror = MIRROR
 
-# ========================
-# Helpers
-# ========================
 def to_digits(s):
     s = str(s).strip()
     ds = [int(c) for c in s if c.isdigit()]
@@ -53,7 +46,8 @@ def sum_category_both(total: int):
         return "High", "High"
 
 def structure_of(digits):
-    cnts = sorted(Counter(digits).values(), reverse=True)
+    from collections import Counter as C
+    cnts = sorted(C(digits).values(), reverse=True)
     if cnts == [1,1,1,1,1]: return 'SINGLE'
     if cnts == [2,1,1,1]:   return 'DOUBLE'
     if cnts == [2,2,1]:     return 'DOUBLE-DOUBLE'
@@ -76,12 +70,12 @@ def wilson_lower_bound(k, n, z=1.96):
 
 def safe_eval(expr, local_vars):
     allowed = {"sum":sum,"any":any,"all":all,"len":len,"min":min,"max":max,"sorted":sorted,
-               "set":set,"list":list,"tuple":tuple,"abs":abs,"range":range,"Counter":Counter}
-    return eval(expr, {"__builtins__": {}}, {**allowed, **local_vars})
+               "set":set,"list":list,"tuple":tuple,"abs":abs,"range":range}
+    from collections import Counter as C
+    local_vars = dict(local_vars)
+    local_vars["Counter"] = C
+    return eval(expr, {"__builtins__": {}}, local_vars)
 
-# ========================
-# Parse history (robust TXT/CSV)
-# ========================
 def parse_history_upload(file):
     name = file.name.lower()
     content = file.getvalue()
@@ -112,11 +106,9 @@ def parse_history_upload(file):
                 pass
     return df
 
-# ========================
-# Follower / Carry
-# ========================
 def follower_matrix(rows):
-    mat = {d: Counter() for d in DIGITS}
+    from collections import Counter as C
+    mat = {d: C() for d in DIGITS}
     for r in rows:
         for d in set(r["seed_digits"]):
             for y in r["winner_digits"]:
@@ -124,14 +116,16 @@ def follower_matrix(rows):
     return mat
 
 def follower_pool_for_seed(seed_digits, mat, top_n=6):
-    cnt = Counter()
+    from collections import Counter as C
+    cnt = C()
     for d in set(seed_digits):
         cnt.update(mat[d])
     if not cnt: return []
     return [d for d,_ in cnt.most_common(top_n)]
 
 def carry_rate_map(train_pairs):
-    seen = Counter(); carried = Counter()
+    from collections import Counter as C
+    seen = C(); carried = C()
     for seed, win in train_pairs:
         for d in set(seed):
             seen[d] += 1
@@ -144,9 +138,6 @@ def top2_carry_candidates(prev_digits, carry_rates):
     digs.sort(key=lambda d: (-carry_rates.get(d,0.0), d))
     return digs[:2]
 
-# ========================
-# Seed feature pack
-# ========================
 def features_dict(seed_digits, prev_digits, prev2_digits):
     total = sum(seed_digits)
     sc_text, sc_compact = sum_category_both(total)
@@ -167,11 +158,13 @@ def features_dict(seed_digits, prev_digits, prev2_digits):
         "trail_change": int(len(prev_digits)==5 and seed_digits[-1] != prev_digits[-1]),
     }
 
-# ========================
-# Step-0 generator
-# ========================
+def bkey(row):
+    f = features_dict(row["seed_digits"], row["prev_digits"], row["prev2_digits"])
+    return tuple(sorted(f.items()))
+
 def step0_generate_pool(seed_digits):
-    c = Counter(seed_digits)
+    from collections import Counter as C
+    c = C(seed_digits)
     pairs = set()
     for d,n in c.items():
         if n >= 2:
@@ -188,98 +181,73 @@ def step0_generate_pool(seed_digits):
                 add3 = [x,y,z]
                 for p in pairs:
                     combo = list(p) + add3
-                    cnts = Counter(combo)
+                    cnts = C(combo)
                     if all(v <= 2 for v in cnts.values()):
                         boxes.add(sort_box_str(combo))
     return sorted(boxes)
 
-# ========================
-# Build expression context
-# ========================
+def sum_category_text(total):
+    return sum_category_both(total)[0]
+
 def build_context_vars(seed_row, follower_mat, carry_rates, combo_digits):
     seed = seed_row["seed_digits"]
     prev = seed_row["prev_digits"]
     prev2 = seed_row["prev2_digits"]
     prev3 = seed_row.get("prev3_digits", [])
-
     follower_top6 = follower_pool_for_seed(seed, follower_mat, 6)
     follower_top2 = follower_pool_for_seed(seed, follower_mat, 2)
-
     c2 = top2_carry_candidates(prev, carry_rates)
     seedp1_set = sorted({(d+1) % 10 for d in seed})
     union2 = sorted(set(c2) | set(seedp1_set))
-
     seed_pos = seed[:] if len(seed)==5 else (seed+[None]*5)[:5]
     p1_pos   = [ (d+1) % 10 for d in seed_pos ]
 
     combo_sum = sum(combo_digits)
     seed_sum  = sum(seed); prev_sum = sum(prev); prev2_sum = sum(prev2); prev3_sum = sum(prev3)
-
     hot6_win  = seed_row["hot_last20"]
     hot7_win  = seed_row.get("hot7_last10", []) or seed_row.get("hot7_last20", [])
     cold_win  = seed_row["cold_last20"]
     due_last2 = seed_row["due_last2"]
-
     common_to_both = set(seed) & set(prev)
     last2_union    = sorted(set(seed) | set(prev))
-
     seed_vtracs  = set(V_TRAC_GROUPS[d] for d in seed)
     combo_vtracs = set(V_TRAC_GROUPS[d] for d in combo_digits)
-
-    sc_text, sc_compact = sum_category_both(seed_sum)
+    sc_text,_ = sum_category_both(seed_sum)
 
     loc = {
         "DIGITS": DIGITS, "EVEN": EVEN, "ODD": ODD, "LOW": LOW, "HIGH": HIGH, "MIRROR": MIRROR,
         "seed_digits": seed, "prev_digits": prev, "prev2_digits": prev2,
-
         "seed_value": int(''.join(map(str, seed))) if len(seed)==5 else None,
         "seed_sum": seed_sum, "prev_sum": prev_sum, "prev_seed_sum": prev_sum,
         "prev_prev_seed_sum": prev2_sum, "prev_prev_prev_seed_sum": prev3_sum,
-
         "seed_digits_1": prev, "seed_digits_2": prev2, "seed_digits_3": prev3,
         "prev_seed_digits": prev, "prev_prev_seed_digits": prev2, "prev_prev_prev_seed_digits": prev3,
-
         "new_seed_digits": set(seed) - set(prev),
         "prev_pattern": (sc_text, ("Even" if seed_sum %2==0 else "Odd")),
         "hot_digits": hot6_win, "cold_digits": cold_win, "due_digits": due_last2,
-
         "seed_counts": Counter(seed),
         "combo_digits": combo_digits, "combo_sum": combo_sum,
-        "combo_sum_cat": sc_text,
+        "combo_sum_cat": sum_category_text(combo_sum),
         "combo_structure": structure_of(combo_digits),
-        "winner_structure": structure_of(seed_row["winner_digits"]),
-
+        "winner_structure": structure_of(seed_row.get("winner_digits", seed)),
         "seed_vtracs": seed_vtracs, "combo_vtracs": combo_vtracs,
-
         "common_to_both": common_to_both, "last2": set(last2_union),
-
         "follower_top6": follower_top6, "follower_top2": follower_top2,
         "carry2": c2, "c1": c2,
         "u1": union2, "u2": union2, "u3": union2, "u4": union2, "u5": union2, "u6": union2, "u7": union2,
-
-        "seedp1": seedp1_set,
-        "seed_plus_1": seedp1_set,
+        "seedp1": seedp1_set, "seed_plus_1": seedp1_set,
         "s1": [seed_pos[0]], "s2": [seed_pos[1]], "s3": [seed_pos[2]], "s4": [seed_pos[3]], "s5": [seed_pos[4]],
         "p1": seedp1_set, "p2": [p1_pos[1]], "p3": [p1_pos[2]], "p4": [p1_pos[3]], "p5": [p1_pos[4]],
-
         "UNION_DIGITS": sorted(set(seed) | set(seedp1_set)),
         "union_digits": sorted(set(seed) | set(seedp1_set)),
-
         "hot_last20": hot6_win, "hot7_last20": seed_row.get("hot7_last20", []), "hot7_last10": hot7_win,
-        "cold_last20": cold_win,
-        "due_last2": due_last2,
-
-        "mirror": MIRROR, "MIRROR_PAIRS": MIRROR_PAIRS,
-        "mirror_of": lambda d: MIRROR.get(d),
-
+        "cold_last20": cold_win, "due_last2": due_last2,
+        "mirror": MIRROR, "MIRROR_PAIRS": MIRROR_PAIRS, "mirror_of": lambda d: MIRROR.get(d),
         "digit_prev_letters": {}, "digit_current_letters": {},
         "prev_core_letters": set(), "core_letters_prevmap": [],
-
         "is_even": lambda d: d in EVEN, "is_odd": lambda d: d in ODD,
         "is_low": lambda d: d in LOW, "is_high": lambda d: d in HIGH,
-        "V_TRAC_GROUPS": V_TRAC_GROUPS, "V_TRAC": V_TRAC_GROUPS, "VTRAC_GROUPS": V_TRAC_GROUPS,
-        "vtrac": V_TRAC_GROUPS,
-
+        "V_TRAC_GROUPS": V_TRAC_GROUPS, "V_TRAC": V_TRAC_GROUPS, "VTRAC_GROUPS": V_TRAC_GROUPS, "vtrac": V_TRAC_GROUPS,
         "nan": float("nan"),
     }
     return loc
@@ -294,14 +262,8 @@ def evaluate_filter_on_combo(expr, seed_row, follower_mat, carry_rates, combo_di
     except Exception:
         return True
 
-def winner_kept_by_filter(expr, seed_row, follower_mat, carry_rates):
-    return evaluate_filter_on_combo(expr, seed_row, follower_mat, carry_rates, seed_row["winner_digits"])
-
-# ========================
-# Streamlit UI
-# ========================
-st.set_page_config(page_title="DC-5 Seed-Aware Filter Recommender v5 (fix)", layout="wide")
-st.title("DC-5 Seed-Aware Filter Recommender — Tester-Compatible (v5, diagnostics-safe)")
+st.set_page_config(page_title="DC-5 Seed-Aware Filter Recommender — Manual Seed (v6)", layout="wide")
+st.title("DC-5 Seed-Aware Filter Recommender — Manual Seed Ready (v6)")
 
 with st.sidebar:
     st.header("Inputs")
@@ -312,8 +274,13 @@ with st.sidebar:
     min_bucket_n = st.number_input("Min bucket sample size", 5, 200, 20, 1)
     keep_lb_thresh = st.slider("Min Wilson-LB KeepRate (SAFE)", 0.50, 1.00, 0.90, 0.01)
     elim_min = st.slider("Min elimination fraction", 0.0, 0.8, 0.20, 0.01)
-    current_idx = st.number_input("Target seed index (0 = earliest after ordering)", 0, 9999, 0, 1)
-    run_btn = st.button("Run")
+    st.markdown("---")
+    manual_seed = st.text_input("Manual seed (5 digits; not in file)", value="", max_chars=10, help="Example: 28825")
+    auto_prev = st.checkbox("Auto-fill prev/prev2/prev3 from last 3 draws in file", value=True)
+    prev_in = st.text_input("Prev (optional)", value="", max_chars=10, help="Leave blank if auto-fill is on.")
+    prev2_in = st.text_input("Prev2 (optional)", value="", max_chars=10)
+    prev3_in = st.text_input("Prev3 (optional)", value="", max_chars=10)
+    run_btn = st.button("Run Recommender")
 
 def normalize_filter_df(df):
     cols = [str(c).strip() for c in df.columns]
@@ -325,8 +292,7 @@ def normalize_filter_df(df):
     if "applicable_if" not in df.columns:
         df["applicable_if"] = df["applicable_if"] if "applicable_if" in df.columns else ""
     if "expression" not in df.columns and "Expression" in df.columns: df["expression"] = df["Expression"]
-    df["id"] = df["id"].astype(str)
-    df["name"] = df["name"].astype(str)
+    df["id"] = df["id"].astype(str); df["name"] = df["name"].astype(str)
     def pbool(x):
         if isinstance(x,bool): return x
         s = str(x).strip().lower()
@@ -341,14 +307,12 @@ if run_btn:
         st.error("Please provide both files.")
         st.stop()
 
-    # Parse history
     try:
         hist_df = parse_history_upload(hist_file)
     except Exception as e:
         st.error(f"History parse error: {e}")
         st.stop()
 
-    # Order rows earliest→latest
     if "Date" in hist_df.columns and pd.api.types.is_datetime64_any_dtype(hist_df["Date"]):
         asc = hist_df["Date"].is_monotonic_increasing
         desc = hist_df["Date"].is_monotonic_decreasing
@@ -369,7 +333,6 @@ if run_btn:
         st.error("Need ≥6 rows with 'Result'.")
         st.stop()
 
-    # Build rows (walk-forward pairs)
     results = hist_df["Result"].astype(str).tolist()
     rows = []
     for i in range(len(results)-1):
@@ -378,7 +341,6 @@ if run_btn:
         prev2 = to_digits(results[i-2]) if i-2 >= 0 else []
         prev3 = to_digits(results[i-3]) if i-3 >= 0 else []
 
-        # rolling window (hot/cold) + last-10 hot7
         start = max(0, i-int(hot_win))
         window_vals = [d for s in results[start:i] for d in to_digits(s)]
         cnt = Counter(window_vals)
@@ -412,7 +374,6 @@ if run_btn:
             "UNION_DIGITS": union_digits,
         })
 
-    # filter CSV
     try:
         filt_df_raw = pd.read_csv(filt_file)
     except Exception as e:
@@ -421,87 +382,112 @@ if run_btn:
     filt_df = normalize_filter_df(filt_df_raw)
     filt_df = filt_df[(filt_df["expression"].str.len()>0) & (filt_df["enabled"]==True)]
 
-    # Precompute prior-only keeps per filter
-    def follower_upto(idx):
-        return follower_matrix([{"seed_digits": rr["seed_digits"], "winner_digits": rr["winner_digits"]} for rr in rows[:idx]])
-    def carryrates_upto(idx):
-        return carry_rate_map([(rr["seed_digits"], rr["winner_digits"]) for rr in rows[:idx]])
+    def follower_upto_end():
+        return follower_matrix([{"seed_digits": rr["seed_digits"], "winner_digits": rr["winner_digits"]} for rr in rows])
+    def carryrates_upto_end():
+        return carry_rate_map([(rr["seed_digits"], rr["winner_digits"]) for rr in rows])
+
+    fm_all = follower_upto_end()
+    cr_all = carryrates_upto_end()
 
     per_index_keep = defaultdict(dict)
     for i, r in enumerate(rows):
-        if i>0:
-            fm = follower_upto(i); cr = carryrates_upto(i)
-        else:
-            fm = {d: Counter() for d in DIGITS}; cr = {d:0.0 for d in DIGITS}
         for _, f in filt_df.iterrows():
-            if not f["enabled"]: continue
             app = (f["applicable_if"] or "").strip()
             applicable = True
             if app:
                 try:
                     if (app.startswith('"') and app.endswith('"')) or (app.startswith("'") and app.endswith("'")):
                         app = eval(app)
-                    applicable = bool(safe_eval(app, build_context_vars(r, fm, cr, r["seed_digits"])))
+                    applicable = bool(safe_eval(app, build_context_vars(r, fm_all, cr_all, r["seed_digits"])))
                 except Exception:
                     applicable = True
             if not applicable:
                 per_index_keep[i][f["id"]] = None
                 continue
-            per_index_keep[i][f["id"]] = int(winner_kept_by_filter(f["expression"], r, fm, cr))
+            keep_flag = evaluate_filter_on_combo(f["expression"], r, fm_all, cr_all, r["winner_digits"])
+            per_index_keep[i][f["id"]] = int(keep_flag)
 
-    cur = int(current_idx)
-    if cur < 0 or cur >= len(rows):
-        st.error(f"Target seed index out of range. Valid 0..{len(rows)-1}.")
+    if manual_seed.strip() == "" or not re.fullmatch(r"\d{5}", re.sub(r"\D","", manual_seed)):
+        st.error("Enter a 5-digit Manual seed to score (e.g., 28825).")
         st.stop()
 
-    rcur = rows[cur]
+    seed_digits = to_digits(manual_seed)
+    if auto_prev:
+        prev = to_digits(results[-1])
+        prev2 = to_digits(results[-2]) if len(results)>=2 else []
+        prev3 = to_digits(results[-3]) if len(results)>=3 else []
+    else:
+        prev  = to_digits(prev_in)  if re.search(r"\d", prev_in)  else []
+        prev2 = to_digits(prev2_in) if re.search(r"\d", prev2_in) else []
+        prev3 = to_digits(prev3_in) if re.search(r"\d", prev3_in) else []
 
-    # prior bucket stats
-    def bkey(row):
-        f = features_dict(row["seed_digits"], row["prev_digits"], row["prev2_digits"])
-        return tuple(sorted(f.items()))
+    start = max(0, len(results)-int(hot_win))
+    window_vals = [d for s in results[start:] for d in to_digits(s)]
+    cnt = Counter(window_vals)
+    hot_sorted = [d for d,_ in cnt.most_common()]
+    cold_sorted = [d for d,_ in cnt.most_common()[::-1]]
+    hot6 = hot_sorted[:6] if hot_sorted else []
+    hot7_20 = hot_sorted[:7] if hot_sorted else []
+    start10 = max(0, len(results)-10)
+    win10_vals = [d for s in results[start10:] for d in to_digits(s)]
+    cnt10 = Counter(win10_vals)
+    hot7_10 = [d for d,_ in cnt10.most_common(7)] if cnt10 else []
+    due2 = sorted(set(range(10)) - set(prev) - set(prev2))
+    s2 = sorted({(d+1)%10 for d in seed_digits})
+    union_digits = sorted(set(seed_digits) | set(s2))
+
+    rcur = {
+        "i": len(rows),
+        "seed_digits": seed_digits,
+        "winner_digits": seed_digits,
+        "prev_digits": prev,
+        "prev2_digits": prev2,
+        "prev3_digits": prev3,
+        "hot_last20": hot6,
+        "hot7_last20": hot7_20,
+        "hot7_last10": hot7_10,
+        "cold_last20": cold_sorted[:6] if cold_sorted else [],
+        "due_last2": due2,
+        "s2": s2,
+        "UNION_DIGITS": union_digits,
+    }
 
     stats = defaultdict(lambda: {"k":0,"n":0})
-    for i in range(cur):
-        key = bkey(rows[i])
+    feat_keys = [bkey(r) for r in rows]
+    cur_key = bkey(rcur)
+    for i, key in enumerate(feat_keys):
         for _, f in filt_df.iterrows():
             val = per_index_keep[i].get(f["id"])
             if val is None: continue
-            stats[(f["id"], key)]["n"] += 1
-            stats[(f["id"], key)]["k"] += int(val==1)
+            if key == cur_key:
+                stats[(f["id"], cur_key)]["n"] += 1
+                stats[(f["id"], cur_key)]["k"] += int(val==1)
 
-    # step-0 pool for current seed
     pool = step0_generate_pool(rcur["seed_digits"])
 
-    # now score each filter at current bucket
-    if cur>0:
-        fm_cur = follower_upto(cur); cr_cur = carryrates_upto(cur)
-    else:
-        fm_cur = {d: Counter() for d in DIGITS}; cr_cur = {d:0.0 for d in DIGITS}
-
     recs = []
-    key_cur = bkey(rcur)
     for _, f in filt_df.iterrows():
-        if not f["enabled"]: continue
         app = (f["applicable_if"] or "").strip()
         applicable = True
         if app:
             try:
                 if (app.startswith('"') and app.endswith('"')) or (app.startswith("'") and app.endswith("'")):
                     app = eval(app)
-                applicable = bool(safe_eval(app, build_context_vars(rcur, fm_cur, cr_cur, rcur["seed_digits"])))
+                applicable = bool(safe_eval(app, build_context_vars(rcur, fm_all, cr_all, rcur["seed_digits"])))
             except Exception:
                 applicable = True
-        if not applicable: continue
+        if not applicable: 
+            continue
 
-        kept = stats[(f["id"], key_cur)]["k"]
-        total = stats[(f["id"], key_cur)]["n"]
+        kept = stats[(f["id"], cur_key)]["k"]
+        total = stats[(f["id"], cur_key)]["n"]
         lb = wilson_lower_bound(kept, total)
 
         survive = 0
         for box in pool:
             digs = [int(c) for c in box]
-            if evaluate_filter_on_combo(f["expression"], rcur, fm_cur, cr_cur, digs):
+            if evaluate_filter_on_combo(f["expression"], rcur, fm_all, cr_all, digs):
                 survive += 1
         elim = (len(pool)-survive)/len(pool) if pool else 0.0
 
@@ -524,41 +510,36 @@ if run_btn:
 
     rec_df = pd.DataFrame(recs).sort_values(["Tag","Score","keep_LB"], ascending=[True, False, False]).reset_index(drop=True)
 
-    st.subheader("Seed context (current)")
+    st.subheader("Manual Seed context")
     c1,c2,c3 = st.columns(3)
     with c1:
         st.write("Seed:", rcur["seed_digits"])
         st.write("Prev:", rcur["prev_digits"])
         st.write("Prev2:", rcur["prev2_digits"])
-        st.write("Due last2:", rcur["due_last2"])
+        st.write("Prev3:", rcur["prev3_digits"])
     with c2:
         sc_text,_ = sum_category_both(sum(rcur["seed_digits"]))
         st.write("Sum cat:", sc_text)
         st.write("EO:", eo_counts(rcur["seed_digits"]))
         st.write("HL:", hl_counts(rcur["seed_digits"]))
+        st.write("Due last2:", rcur["due_last2"])
     with c3:
         st.write("Step-0 size:", len(pool))
+        st.write("Hot6:", rcur["hot_last20"])
+        st.write("Cold6:", rcur["cold_last20"])
 
-    st.subheader("Recommendations (prior-only stats)")
+    st.subheader("Recommendations (SAFE/WATCH/RISKY) for this Manual Seed")
     if len(rec_df)==0:
-        st.info("No applicable filters produced scores at this index with current thresholds.")
+        st.info("No applicable filters produced scores with current thresholds. Try lowering thresholds or expanding history.")
     else:
         st.dataframe(rec_df, use_container_width=True)
 
-    # Diagnostics: feature → safety
-    st.markdown("### Diagnostics: Seed characteristics → Filter safety")
-    if cur == 0:
-        st.info("Diagnostics need prior rows. Increase the Target seed index and rerun.")
-        st.stop()
+    st.markdown("### Diagnostics: Which seed traits make this filter safe?")
     if len(rec_df)==0:
-        st.info("No applicable filters to analyze at this index.")
         st.stop()
-
-    choices = [f"{r['filter_id']} — {r['name']}" for _, r in rec_df.iterrows()]
-    pick = st.selectbox("Pick filter", choices, index=0)
+    pick = st.selectbox("Pick filter", [f"{r['filter_id']} — {r['name']}" for _, r in rec_df.iterrows()], index=0)
     pick_id = pick.split(" — ")[0]
 
-    # Build feature frame for prior rows
     feat_rows = []
     for i, r in enumerate(rows):
         f = features_dict(r["seed_digits"], r["prev_digits"], r["prev2_digits"])
@@ -567,30 +548,29 @@ if run_btn:
     feat_df = pd.DataFrame(feat_rows)
 
     feat_cols = ["sum_cat","sum_cat_compact","eo","hl","spread_band","carry_count","mirror_hit","lead_change","trail_change"]
-    prior = list(range(cur))
     rows_out = []
-    for feat in feat_cols:
-        for i in prior:
-            val = feat_df.loc[i, feat]
-            keep_val = per_index_keep[i].get(pick_id)
-            if keep_val is None: continue
-            rows_out.append({"feature": feat, "value": val,
-                             "kept": int(keep_val==1), "total": 1,
-                             "matches_current": bool(val == feat_df.loc[cur, feat])})
+    cur_feat = features_dict(rcur["seed_digits"], rcur["prev_digits"], rcur["prev2_digits"])
+    for i, r in enumerate(rows):
+        keep_val = per_index_keep[i].get(pick_id)
+        if keep_val is None: 
+            continue
+        for feat in feat_cols:
+            rows_out.append({
+                "feature": feat,
+                "value": feat_df.loc[i, feat],
+                "kept": int(keep_val==1),
+                "total": 1,
+                "matches_current": bool(feat_df.loc[i, feat] == cur_feat[feat])
+            })
     if not rows_out:
-        st.info("No prior rows where this filter was applicable. Try a later target index or another filter.")
-        st.stop()
+        st.info("No prior rows where this filter was applicable. Try a different filter.")
+    else:
+        diag_df = pd.DataFrame(rows_out).groupby(["feature","value","matches_current"], as_index=False).agg({"kept":"sum","total":"sum"})
+        diag_df["keep_LB"] = diag_df.apply(lambda r: wilson_lower_bound(r["kept"], r["total"]), axis=1)
+        diag_df = diag_df.sort_values(["matches_current","keep_LB","total"], ascending=[False, False, False]).reset_index(drop=True)
+        st.dataframe(diag_df, use_container_width=True)
 
-    # aggregate
-    diag_df = pd.DataFrame(rows_out)
-    diag_df = diag_df.groupby(["feature","value","matches_current"], as_index=False).agg({"kept":"sum","total":"sum"})
-    diag_df["keep_LB"] = diag_df.apply(lambda r: wilson_lower_bound(r["kept"], r["total"]), axis=1)
-    sort_cols = [c for c in ["matches_current","keep_LB","total"] if c in diag_df.columns]
-    diag_df = diag_df.sort_values(sort_cols, ascending=[False, False, False]).reset_index(drop=True)
-
-    st.dataframe(diag_df, use_container_width=True)
-
-    # Download recs
-    csv_buf = io.StringIO()
+    import io as _io
+    csv_buf = _io.StringIO()
     rec_df.to_csv(csv_buf, index=False)
-    st.download_button("Download recommendations CSV", data=csv_buf.getvalue(), file_name="filter_recommendations_v5_fix.csv", mime="text/csv")
+    st.download_button("Download recommendations CSV", data=csv_buf.getvalue(), file_name="filter_recommendations_manual_seed_v6.csv", mime="text/csv")
