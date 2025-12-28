@@ -1,35 +1,8 @@
+# dc5_inclusion_lists_app.py
 # DC-5 Inclusion Lists (≥70% Wilson-LB) — Seed-Conditioned Hot/Cold/Due
-# ---------------------------------------------------------------
-# Two modes — your choice each run:
-#  1) Use cached calibration (fast): loads OVERALL/CONTEXT Wilson-LB tables from disk
-#  2) Recalculate from recent history (fresh): rebuilds probabilities from the history you supply
-#
-# Workflow
-# - Paste the last 10 draws (chronological: oldest → newest). The last entry is the CURRENT SEED.
-# - Pick a calibration mode in the right column:
-#     • Use cached calibration → no history upload required (after you have calibrated once)
-#     • Recalculate from recent history → upload or paste history; optionally limit to most-recent N draws;
-#       you can also save the new tables as the default cache for future runs.
-# - The app builds 3- and 4-digit inclusion lists for today’s seed using the last-10 heat map and
-#   scores them with Wilson-LB from either the cached tables or the fresh recalculation. Only lists
-#   with LB ≥ your threshold (default 70%) are shown.
-#
-# Families we score (derived from last-10 heat):
-#   L3_HHH   = Top-3 Hot
-#   L3_HHD   = Top-2 Hot + Best Due (missing last 2 draws)
-#   L3_HCD   = Top-1 Hot + Top-1 Cold + Best Due
-#   L3_HHC   = Top-2 Hot + Top-1 Cold
-#   L4_HHHH  = Top-4 Hot
-#   L4_HHCD  = Top-2 Hot + Top-1 Cold + Best Due
-#   L4_HHDD  = Top-2 Hot + Top-2 Due
-#
-# No simulations. Probabilities are computed from your real seed→winner transitions.
-#
-# Run locally:
-#   pip install streamlit pandas
-#   streamlit run dc5_inclusion_lists_app.py
+# (CSV/TXT friendly + bigger non-scrolling Last-10 input + robust parsing)
 
-import math
+import math, re, io
 from typing import List, Tuple, Dict, Optional, Tuple as Tup
 
 import pandas as pd
@@ -53,39 +26,50 @@ def to_digits(s: str) -> List[int]:
         digs = ([0] * (5 - len(digs))) + digs[-5:]
     return digs
 
-def parse_draws_from_text(text: str) -> List[str]:
+def _extract_5s_from_any_text(text: str) -> List[str]:
+    """Return all 5-digit chunks found in arbitrary text (handles spaces, commas, CSV cells)."""
     if not text:
         return []
-    # Extract 5 consecutive digits sequences without regex escapes
-    buf, draws = [], []
-    for ch in text:
-        if ch.isdigit():
-            buf.append(ch)
-            if len(buf) >= 5:
-                # keep a moving window; only record when we just completed a 5-length run boundary
-                if not (len(buf) > 5 and buf[-6].isdigit()):
-                    draws.append(''.join(buf[-5:]))
-        else:
-            buf = []
-    # Above might over-capture overlapping sequences; instead, do a simpler pass splitting on non-digits
-    parts, cur = [], []
-    for ch in text:
-        if ch.isdigit():
-            cur.append(ch)
-        else:
-            if len(cur) >= 5:
-                # cut into 5-length chunks in order
-                s = ''.join(cur)
-                for i in range(0, len(s), 5):
-                    if i+5 <= len(s):
-                        parts.append(s[i:i+5])
-            cur = []
-    if len(cur) >= 5:
-        s = ''.join(cur)
-        for i in range(0, len(s), 5):
-            if i+5 <= len(s):
-                parts.append(s[i:i+5])
-    return parts
+    # find non-overlapping 5-digit tokens (e.g., '12345')
+    tokens = re.findall(r'\b\d{5}\b', text)
+    return tokens
+
+def _extract_5s_from_dataframe(df: pd.DataFrame) -> List[str]:
+    """Flatten a DataFrame and extract every 5-digit token from any column."""
+    chunks: List[str] = []
+    for col in df.columns:
+        series = df[col].astype(str)
+        for cell in series:
+            chunks.extend(_extract_5s_from_any_text(cell))
+    return chunks
+
+def parse_draws_from_text(text: str) -> List[str]:
+    # Wrapper kept for backward-compatibility
+    return _extract_5s_from_any_text(text)
+
+def parse_draws_from_upload(file) -> List[str]:
+    """Accept CSV/TXT. If CSV, parse with pandas then scan every column; if TXT, scan the text."""
+    if file is None:
+        return []
+    data = file.read()
+    # try text decodes
+    decoded = None
+    for enc in ("utf-8","utf-16","latin-1"):
+        try:
+            decoded = data.decode(enc)
+            break
+        except Exception:
+            continue
+    if decoded is None:
+        return []
+    # If it looks like CSV (has commas or multiple lines), try pandas first
+    looks_like_csv = ("," in decoded) or ("\n" in decoded and ";" in decoded)
+    try:
+        df = pd.read_csv(io.StringIO(decoded))
+        return _extract_5s_from_dataframe(df)
+    except Exception:
+        # Not a CSV (or failed) → plain text
+        return _extract_5s_from_any_text(decoded)
 
 def seed_structure(digits: List[int]) -> str:
     cnts = sorted(Counter(digits).values(), reverse=True)
@@ -204,9 +188,7 @@ def build_transitions(history_results: List[str], heat_window: int) -> pd.DataFr
         win_s  = results[i+1]
         seed = to_digits(seed_s)
         win  = to_digits(win_s)
-        prev = to_digits(results[i-1]) if i-1>=0 else []
-        prev2= to_digits(results[i-2]) if i-2>=0 else []
-        ranked_counts(window)  # to mirror current heat computation
+        # mirror current heat computation
         lists = current_seed_lists(results[max(0, i - heat_window): i+1], heat_window)
 
         def hit(key: str) -> int:
@@ -264,10 +246,25 @@ with st.sidebar:
     max_lists_4 = st.number_input("Max 4-digit lists", 1, 10, 4, step=1)
 
 colL, colR = st.columns([1,1])
+
 with colL:
-    st.subheader("Paste last 10 draws (chronological: oldest → newest; last = current seed)")
-    last10_text = st.text_area("Enter exactly 10 five-digit draws", height=140)
+    st.subheader("Last 10 draws (oldest → newest; last = current seed)")
+    # Larger height to avoid scrolling; plus a CSV/TXT uploader for convenience
+    last10_text = st.text_area("Paste 10 five-digit draws (spaces/commas/lines OK)", height=220, help="Example: 30209 26418 22305 74762 67539 59188 48956 03018 31185 79477")
+    last10_file = st.file_uploader("…or upload a CSV/TXT containing your last 10", type=["csv","txt"], key="last10_upl")
     order_flip_last10 = st.checkbox("My last-10 is most-recent-first (reverse)", value=False)
+
+    # live preview of parsed draws
+    parsed_last10: List[str] = []
+    if last10_file is not None:
+        parsed_last10 = parse_draws_from_upload(last10_file)
+    elif last10_text.strip():
+        parsed_last10 = parse_draws_from_text(last10_text)
+
+    if order_flip_last10 and parsed_last10:
+        parsed_last10 = parsed_last10[::-1]
+
+    st.caption(f"Parsed last-10 count: **{len(parsed_last10)}** → {parsed_last10[-10:] if parsed_last10 else []}")
 
 with colR:
     st.subheader("Calibration mode")
@@ -281,37 +278,31 @@ with colR:
     hist_results: List[str] = []
 
     if mode == "Recalculate from recent history (fresh)":
-        hist_file = st.file_uploader("Upload history (TXT/CSV)", type=["txt","csv"]) 
-        hist_text = st.text_area("…or paste a long history block", height=140)
+        hist_file = st.file_uploader("Upload history (TXT/CSV)", type=["txt","csv"], key="hist_upl")
+        hist_text = st.text_area("…or paste a long history block", height=180)
         hist_order_flip = st.checkbox("My history is most-recent-first (reverse)", value=True)
         recent_limit = st.number_input("Limit to most recent N draws (0 = use all)", min_value=0, max_value=100000, value=0, step=50)
         save_cache = st.checkbox("After recalculation, save tables as default cache", value=True)
 
         if hist_file is not None:
-            data = hist_file.read()
-            text = None
-            for enc in ("utf-8","latin-1","utf-16"):
-                try:
-                    text = data.decode(enc)
-                    break
-                except Exception:
-                    continue
-            hist_results = parse_draws_from_text(text or "")
+            hist_results = parse_draws_from_upload(hist_file)
         elif hist_text.strip():
             hist_results = parse_draws_from_text(hist_text)
+
         if hist_order_flip:
             hist_results = hist_results[::-1]
         if recent_limit and recent_limit > 0:
             hist_results = hist_results[-int(recent_limit):]
 
+        st.caption(f"Parsed history count: **{len(hist_results)}** (oldest → newest preview: {hist_results[:5]} … {hist_results[-5:]})")
+
 run = st.button("Compute inclusion lists (≥LB threshold)")
 
 if run:
-    last10 = parse_draws_from_text(last10_text)
-    if order_flip_last10:
-        last10 = last10[::-1]
+    # Use the ten most recent from whatever was parsed for last10 input
+    last10 = parsed_last10[-int(heat_window):] if parsed_last10 else []
     if len(last10) != int(heat_window):
-        st.error(f"Please supply exactly {int(heat_window)} draws (found {len(last10)}). The last one is the current seed.")
+        st.error(f"Please supply exactly {int(heat_window)} draws (found {len(last10)}). The last one must be the current seed.")
         st.stop()
 
     try:
